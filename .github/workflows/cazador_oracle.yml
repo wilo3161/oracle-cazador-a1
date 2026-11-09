@@ -1,0 +1,58 @@
+name: Cazador Oracle gratis (A1)
+# Busca cada 10 minutos una máquina Always Free (VM.Standard.A1.Flex) en Oracle Bogotá, aunque la PC esté apagada.
+# Solo formas gratuitas (el script rechaza cualquier otra). Cuando la consigue, avisa por Telegram y se desactiva solo.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: cazador-oracle
+  cancel-in-progress: false
+
+jobs:
+  cazar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Librerías
+        run: pip install --quiet oci requests python-dotenv psutil
+      - name: Credenciales de Oracle
+        env:
+          OCI_CONFIG: ${{ secrets.OCI_CONFIG }}
+          OCI_KEY_PEM: ${{ secrets.OCI_KEY_PEM }}
+        run: |
+          if [ -z "$OCI_CONFIG" ] || [ -z "$OCI_KEY_PEM" ]; then echo "::warning::Faltan OCI_CONFIG / OCI_KEY_PEM"; exit 0; fi
+          echo "LISTO=1" >> "$GITHUB_ENV"
+          mkdir -p ~/.oci ~/.ssh
+          printf '%s\n' "$OCI_KEY_PEM" | tr -d '\r' > ~/.oci/oci_api_key.pem && chmod 600 ~/.oci/oci_api_key.pem
+          printf '%s\n' "$OCI_CONFIG" | tr -d '\r' | sed "s#^key_file=.*#key_file=$HOME/.oci/oci_api_key.pem#" > ~/.oci/config
+          chmod 600 ~/.oci/config
+          cp cazador/id_maia_cloud.pub ~/.ssh/id_maia_cloud.pub
+      - name: Una ronda de caza
+        if: env.LISTO == '1'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: timeout 420 python cazador/a1_capacity_hunter.py --once 2>&1 | sed -E "s/[0-9]{1,3}([.][0-9]{1,3}){3}/x.x.x.x/g; s/ocid1[^ ]*/ocid…/g" || true
+      - name: ¿Ya hay máquina A1? Entonces apagar el cazador
+        if: env.LISTO == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'EOF' > estado.txt
+          import oci
+          c = oci.config.from_file()
+          ins = oci.core.ComputeClient(c).list_instances(compartment_id=c["tenancy"], display_name="maia-a1-alwaysfree").data
+          print("SI" if any(i.lifecycle_state in ("RUNNING", "PROVISIONING", "STARTING") for i in ins) else "NO")
+          EOF
+          cat estado.txt
+          if grep -q SI estado.txt; then gh workflow disable "Cazador Oracle gratis (A1)" -R "$GITHUB_REPOSITORY"; fi
